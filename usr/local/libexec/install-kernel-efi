@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from string import hexdigits
-from subprocess import check_output, check_call
+from subprocess import check_output, check_call, Popen, PIPE
 from tempfile import TemporaryDirectory
 
 import shutil
@@ -61,6 +61,24 @@ def read_machine_id():
         return inp.readline().rstrip('\n')
 
 
+def minify_ucode(orig_ucode_path, out_ucode_path):
+    bsdtar_process = Popen([
+        'bsdtar',
+        '-Oxf', orig_ucode_path,
+    ], stdout=PIPE)
+
+    # Close bsdtar's stdout in order to allow bsdtar to receive SIGPIPE in case
+    # iucode_tool exits prematurely.
+    with bsdtar_process.stdout:
+        iucode_process = Popen([
+            'iucode_tool',
+            '-tb', '-lS', '-',
+            f'--write-earlyfw={out_ucode_path}',
+        ], stdin=bsdtar_process.stdout)
+
+    iucode_process.wait()
+
+
 class ObjCopyArgs:
     def __init__(self):
         self.args = ['objcopy']
@@ -82,9 +100,14 @@ def main():
     with TemporaryDirectory(prefix='install-kernel-efi-') as tmpdir:
         # Prepend ucode to initramfs if necessary.
         if Paths.UCODE.is_file():
+            # Extract the microcode for the running CPU only.
+            ucode_path = Path(tmpdir) / 'intel-ucode.img'
+            minify_ucode(Paths.UCODE, ucode_path)
+
+            # Prepend the microcode image to the initramfs.
             initramfs_path = Path(tmpdir) / 'initramfs.img'
             with initramfs_path.open('wb') as new_initramfs:
-                with Paths.UCODE.open('rb') as ucode:
+                with ucode_path.open('rb') as ucode:
                     shutil.copyfileobj(ucode, new_initramfs)
                 with Paths.INITRAMFS.open('rb') as initramfs:
                     shutil.copyfileobj(initramfs, new_initramfs)

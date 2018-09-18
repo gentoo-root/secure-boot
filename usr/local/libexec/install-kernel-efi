@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from string import hexdigits
-from subprocess import run, PIPE
+from subprocess import check_output, check_call
 from tempfile import TemporaryDirectory
 
 import shutil
@@ -33,15 +33,13 @@ class OSRelease:
         self.filename = str(path)
 
     def __getitem__(self, key):
-        process = run(
+        output = check_output(
             f'source {self.filename} && echo -n "${key}"',
             shell=True,
             env={},
-            check=True,
-            stdout=PIPE,
             encoding='utf-8',
         )
-        return process.stdout or OSRelease.DEFAULTS.get(key)
+        return output or OSRelease.DEFAULTS.get(key)
 
     def line(self, key):
         with Path(self.filename).open('rt') as os_release:
@@ -116,17 +114,17 @@ def main():
         objcopy_args.add_section('linux', Paths.KERNEL, 0x2000000)
         objcopy_args.add_section('initrd', initramfs_path, 0x3000000)
         objcopy_args.add_inout(Paths.EFI_STUB, image_path)
-        run(objcopy_args.args, check=True)
+        check_call(objcopy_args.args)
 
         # Sign the image.
         signed_image_path = Path(tmpdir) / f'{image_name}.signed'
-        run([
+        check_call([
             'sbsign',
             '--key', str(Paths.PKI / 'db' / 'kernel.key'),
             '--cert', str(Paths.PKI / 'db' / 'kernel.crt'),
             '--output', str(signed_image_path),
             str(image_path),
-        ], check=True)
+        ])
 
         # Move the image.
         if not Paths.EFI_MOUNTPOINT.is_dir():
@@ -138,8 +136,8 @@ def main():
 
         # Create a boot entry if none exists.
         new_entry_name = f'{os_release["NAME"]} {machine_id}'
-        process = run(['efibootmgr'], check=True, stdout=PIPE, encoding='utf-8')
-        for line in process.stdout.split('\n'):
+        output = check_output(['efibootmgr'], encoding='utf-8')
+        for line in output.split('\n'):
             if all([
                 line.startswith('Boot'),
                 set(line[4:8]).issubset(hexdigits),
@@ -150,13 +148,13 @@ def main():
                 if entry_name == new_entry_name:
                     break
         else:
-            run([
+            check_call([
                 'efibootmgr',
                 '--quiet',
                 '--create',
                 '--loader', Path('/') / target_rel_path / image_name,
                 '--label', new_entry_name,
-            ], check=True)
+            ])
 
 
 if __name__ == '__main__':

@@ -5,11 +5,12 @@ from string import hexdigits
 from subprocess import check_output, check_call, Popen, PIPE
 from tempfile import TemporaryDirectory
 
+import os
 import shutil
 
 
 class Paths:
-    DEV_NULL = Path('/dev/null')
+    DEV_NULL = Path(os.devnull)
     OS_RELEASE = [Path('/etc/os-release'), Path('/usr/lib/os-release')]
     MACHINE_ID = Path('/etc/machine-id')
     CMDLINE = Path('/etc/kernel/cmdline')
@@ -53,7 +54,7 @@ def create_os_release():
     for path in Paths.OS_RELEASE:
         if path.exists():
             return OSRelease(path)
-    return Paths.DEV_NULL
+    return OSRelease(Paths.DEV_NULL)
 
 
 def read_machine_id():

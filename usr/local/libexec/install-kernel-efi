@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+
+from pathlib import Path
+from string import hexdigits
+from subprocess import run, PIPE
+from tempfile import TemporaryDirectory
+
+import shutil
+
+
+class Paths:
+    DEV_NULL = Path('/dev/null')
+    OS_RELEASE = [Path('/etc/os-release'), Path('/usr/lib/os-release')]
+    MACHINE_ID = Path('/etc/machine-id')
+    CMDLINE = Path('/etc/kernel/cmdline')
+    KERNEL = Path('/boot/vmlinuz-linux')
+    INITRAMFS = Path('/boot/initramfs-linux.img')
+    UCODE = Path('/boot/intel-ucode.img')
+    EFI_STUB = Path('/usr/lib/systemd/boot/efi/linuxx64.efi.stub')
+    SPLASH = Path('/usr/share/systemd/bootctl/splash-arch.bmp')
+    EFI_MOUNTPOINT = Path('/boot/efi')
+    PKI = Path('/root/pki/secure-boot')
+
+
+class OSRelease:
+    DEFAULTS = {
+        'ID': 'linux',
+        'NAME': 'Linux',
+        'PRETTY_NAME': 'Linux',
+    }
+
+    def __init__(self, path):
+        self.filename = str(path)
+
+    def __getitem__(self, key):
+        process = run(
+            f'source {self.filename} && echo -n "${key}"',
+            shell=True,
+            env={},
+            check=True,
+            stdout=PIPE,
+            encoding='utf-8',
+        )
+        return process.stdout or OSRelease.DEFAULTS.get(key)
+
+    def line(self, key):
+        with Path(self.filename).open('rt') as os_release:
+            for line in os_release:
+                if line.startswith(f'{key}='):
+                    return line.rstrip('\n')
+        return f'{key}={OSRelease.DEFAULTS.get(key)}'
+
+
+def create_os_release():
+    for path in Paths.OS_RELEASE:
+        if path.exists():
+            return OSRelease(path)
+    return Paths.DEV_NULL
+
+
+def read_machine_id():
+    with Paths.MACHINE_ID.open('rt') as inp:
+        return inp.readline().rstrip('\n')
+
+
+class ObjCopyArgs:
+    def __init__(self):
+        self.args = ['objcopy']
+
+    def add_section(self, name, path, address):
+        self.args += [
+            '--add-section', f'.{name}={path}',
+            '--change-section-vma', f'.{name}={hex(address)}',
+        ]
+
+    def add_inout(self, inp, out):
+        self.args += [inp, out]
+
+
+def main():
+    os_release = create_os_release()
+    machine_id = read_machine_id()
+
+    with TemporaryDirectory(prefix='install-kernel-efi-') as tmpdir:
+        # Prepend ucode to initramfs if necessary.
+        if Paths.UCODE.is_file():
+            initramfs_path = Path(tmpdir) / 'initramfs.img'
+            with initramfs_path.open('wb') as new_initramfs:
+                with Paths.UCODE.open('rb') as ucode:
+                    shutil.copyfileobj(ucode, new_initramfs)
+                with Paths.INITRAMFS.open('rb') as initramfs:
+                    shutil.copyfileobj(initramfs, new_initramfs)
+        else:
+            initramfs_path = Paths.INITRAMFS
+
+        # Prepare os-release for systemd-boot.
+        os_release_path = Path(tmpdir) / 'os-release'
+        with os_release_path.open('wt') as new_os_release:
+            used_keys = set()
+            for key in ['PRETTY_NAME', 'ID', 'VERSION_ID', 'BUILD_ID']:
+                line = os_release.line(key)
+                if line is not None:
+                    new_os_release.write(f'{line}\n')
+                    used_keys.add(key)
+            if all(key not in used_keys for key in ['VERSION_ID', 'BUILD_ID']):
+                new_os_release.write('VERSION_ID=latest\n')
+
+        # Generate the image.
+        image_name = f'{machine_id}-{os_release["ID"]}.efi'
+        image_path = Path(tmpdir) / image_name
+        objcopy_args = ObjCopyArgs()
+        objcopy_args.add_section('osrel', os_release_path, 0x20000)
+        objcopy_args.add_section('cmdline', Paths.CMDLINE, 0x30000)
+        if Paths.SPLASH.is_file():
+            objcopy_args.add_section('splash', Paths.SPLASH, 0x40000)
+        objcopy_args.add_section('linux', Paths.KERNEL, 0x2000000)
+        objcopy_args.add_section('initrd', initramfs_path, 0x3000000)
+        objcopy_args.add_inout(Paths.EFI_STUB, image_path)
+        run(objcopy_args.args, check=True)
+
+        # Sign the image.
+        signed_image_path = Path(tmpdir) / f'{image_name}.signed'
+        run([
+            'sbsign',
+            '--key', str(Paths.PKI / 'db' / 'kernel.key'),
+            '--cert', str(Paths.PKI / 'db' / 'kernel.crt'),
+            '--output', str(signed_image_path),
+            str(image_path),
+        ], check=True)
+
+        # Move the image.
+        if not Paths.EFI_MOUNTPOINT.is_dir():
+            raise ValueError('Paths.EFI_MOUNTPOINT must point to the mount point of the EFI partition')
+        target_rel_path = Path('EFI') / 'Linux'
+        target_path = Paths.EFI_MOUNTPOINT / target_rel_path
+        target_path.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(signed_image_path), str(target_path / image_name))
+
+        # Create a boot entry if none exists.
+        new_entry_name = f'{os_release["NAME"]} {machine_id}'
+        process = run(['efibootmgr'], check=True, stdout=PIPE, encoding='utf-8')
+        for line in process.stdout.split('\n'):
+            if all([
+                line.startswith('Boot'),
+                set(line[4:8]).issubset(hexdigits),
+                line[8:9] in ' *',
+                line[9:10] == ' ',
+            ]):
+                entry_name = line[10:]
+                if entry_name == new_entry_name:
+                    break
+        else:
+            run([
+                'efibootmgr',
+                '--quiet',
+                '--create',
+                '--loader', Path('/') / target_rel_path / image_name,
+                '--label', new_entry_name,
+            ], check=True)
+
+
+if __name__ == '__main__':
+    main()

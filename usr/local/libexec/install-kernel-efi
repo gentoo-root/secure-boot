@@ -99,20 +99,21 @@ def main():
 
     with TemporaryDirectory(prefix='install-kernel-efi-') as tmpdir:
         # Prepend ucode to initramfs if necessary.
+        initramfs_path = Paths.INITRAMFS
         if Paths.UCODE.is_file():
             # Extract the microcode for the running CPU only.
             ucode_path = Path(tmpdir) / 'intel-ucode.img'
             minify_ucode(Paths.UCODE, ucode_path)
 
-            # Prepend the microcode image to the initramfs.
-            initramfs_path = Path(tmpdir) / 'initramfs.img'
-            with initramfs_path.open('wb') as new_initramfs:
-                with ucode_path.open('rb') as ucode:
-                    shutil.copyfileobj(ucode, new_initramfs)
-                with Paths.INITRAMFS.open('rb') as initramfs:
-                    shutil.copyfileobj(initramfs, new_initramfs)
-        else:
-            initramfs_path = Paths.INITRAMFS
+            # Prepend the microcode image to the initramfs if the microcode for
+            # the running CPU was extracted.
+            if ucode_path.exists():
+                initramfs_path = Path(tmpdir) / 'initramfs.img'
+                with initramfs_path.open('wb') as new_initramfs:
+                    with ucode_path.open('rb') as ucode:
+                        shutil.copyfileobj(ucode, new_initramfs)
+                    with Paths.INITRAMFS.open('rb') as initramfs:
+                        shutil.copyfileobj(initramfs, new_initramfs)
 
         # Prepare os-release for systemd-boot.
         os_release_path = Path(tmpdir) / 'os-release'
